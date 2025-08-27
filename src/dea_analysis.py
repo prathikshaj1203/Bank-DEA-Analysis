@@ -1,75 +1,96 @@
 import numpy as np
 import pandas as pd
-from pyomo.environ import *
+from scipy.optimize import linprog
 
 def dea_ccr(X: pd.DataFrame, Y: pd.DataFrame):
-    """CCR DEA model (constant returns to scale)."""
+    """
+    CCR DEA model (constant returns to scale) using SciPy linprog.
+    Input-oriented.
+    """
     n, m = X.shape
     _, s = Y.shape
     eff_scores = []
 
     for j in range(n):
-        model = ConcreteModel()
-        model.u = Var(range(s), domain=NonNegativeReals)
-        model.v = Var(range(m), domain=NonNegativeReals)
+        x0, y0 = X.iloc[j].values, Y.iloc[j].values
 
-        # Objective: Maximize efficiency of DMU j
-        model.obj = Objective(
-            expr=sum(model.u[r] * Y.iloc[j, r] for r in range(s)),
-            sense=maximize
-        )
+        # Variables: θ + λ1..λn
+        c = np.zeros(n + 1)
+        c[0] = 1  # minimize θ
 
-        # Constraint: denominator = 1
-        model.con1 = Constraint(expr=sum(model.v[i] * X.iloc[j, i] for i in range(m)) == 1)
+        A = []
+        b = []
 
-        # Constraints for all DMUs
-        model.cons = ConstraintList()
-        for k in range(n):
-            model.cons.add(
-                sum(model.u[r] * Y.iloc[k, r] for r in range(s))
-                - sum(model.v[i] * X.iloc[k, i] for i in range(m)) <= 0
-            )
+        # Input constraints: Σ λ x ≤ θ * x0
+        for i in range(m):
+            row = np.zeros(n + 1)
+            row[0] = -x0[i]         # -θ * x0
+            row[1:] = X.iloc[:, i]  # + Σ λ x
+            A.append(row)
+            b.append(0)
 
-        SolverFactory("highs").solve(model, tee=False)
+        # Output constraints: Σ λ y ≥ y0
+        for r in range(s):
+            row = np.zeros(n + 1)
+            row[1:] = -Y.iloc[:, r]  # -Σ λ y
+            A.append(row)
+            b.append(-y0[r])
 
-        eff = sum(model.u[r].value * Y.iloc[j, r] for r in range(s))
-        eff_scores.append(eff)
+        bounds = [(0, None)] * (n + 1)  # θ ≥ 0, λ ≥ 0
+
+        res = linprog(c, A_ub=np.array(A), b_ub=np.array(b),
+                      bounds=bounds, method="highs")
+
+        eff_scores.append(res.x[0] if res.success else np.nan)
 
     return np.array(eff_scores)
 
+
 def dea_bcc(X: pd.DataFrame, Y: pd.DataFrame):
-    """BCC DEA model (variable returns to scale)."""
+    """
+    BCC DEA model (variable returns to scale) using SciPy linprog.
+    Input-oriented.
+    """
     n, m = X.shape
     _, s = Y.shape
     eff_scores = []
 
     for j in range(n):
-        model = ConcreteModel()
-        model.u = Var(range(s), domain=NonNegativeReals)
-        model.v = Var(range(m), domain=NonNegativeReals)
-        model.lmbda = Var(range(n), domain=NonNegativeReals)
+        x0, y0 = X.iloc[j].values, Y.iloc[j].values
 
-        # Objective
-        model.obj = Objective(
-            expr=sum(model.u[r] * Y.iloc[j, r] for r in range(s)),
-            sense=maximize
-        )
+        # Variables: θ + λ1..λn
+        c = np.zeros(n + 1)
+        c[0] = 1
 
-        model.con1 = Constraint(expr=sum(model.v[i] * X.iloc[j, i] for i in range(m)) == 1)
+        A = []
+        b = []
 
-        model.cons = ConstraintList()
-        for k in range(n):
-            model.cons.add(
-                sum(model.u[r] * Y.iloc[k, r] for r in range(s))
-                - sum(model.v[i] * X.iloc[k, i] for i in range(m)) <= 0
-            )
+        # Input constraints
+        for i in range(m):
+            row = np.zeros(n + 1)
+            row[0] = -x0[i]
+            row[1:] = X.iloc[:, i]
+            A.append(row)
+            b.append(0)
 
-        # Convexity constraint
-        model.conv = Constraint(expr=sum(model.lmbda[k] for k in range(n)) == 1)
+        # Output constraints
+        for r in range(s):
+            row = np.zeros(n + 1)
+            row[1:] = -Y.iloc[:, r]
+            A.append(row)
+            b.append(-y0[r])
 
-        SolverFactory("highs").solve(model, tee=False)
+        # Convexity constraint: Σ λ = 1
+        Aeq = np.zeros((1, n + 1))
+        Aeq[0, 1:] = 1
+        beq = [1]
 
-        eff = sum(model.u[r].value * Y.iloc[j, r] for r in range(s))
-        eff_scores.append(eff)
+        bounds = [(0, None)] * (n + 1)
+
+        res = linprog(c, A_ub=np.array(A), b_ub=np.array(b),
+                      A_eq=Aeq, b_eq=beq,
+                      bounds=bounds, method="highs")
+
+        eff_scores.append(res.x[0] if res.success else np.nan)
 
     return np.array(eff_scores)
